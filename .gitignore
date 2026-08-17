@@ -1,0 +1,8 @@
+/build/
+/build-windows/
+/bof/build/
+/artifacts/
+/.tools/
+*.o
+*.out
+compile_commands.json

