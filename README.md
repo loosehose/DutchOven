@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/dutchoven.png" alt="DutchOven red cooking pot logo" width="520">
+  <img src="/loosehose/DutchOven/raw/refs/heads/main/assets/dutchoven.png" alt="DutchOven red cooking pot logo" width="520">
 </p>
 
 <h1 align="center">DutchOven</h1>
