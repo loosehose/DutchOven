@@ -4,5 +4,6 @@
 /artifacts/
 /.tools/
 *.o
+!bof/dutchoven.x64.o
 *.out
 compile_commands.json

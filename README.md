@@ -173,7 +173,7 @@ Primary outputs:
 | `build/dutchoven_tests` | Core unit tests |
 | `build-windows/dutchoven.exe` | Native Windows WFP gate |
 | `build-windows/dutchoven_tests.exe` | Native Windows test binary |
-| `bof/build/dutchoven.x64.o` | x64 Beacon Object File |
+| `bof/dutchoven.x64.o` | Versioned x64 Beacon Object File |
 
 The Windows executable links only against Windows system libraries: `fwpuclnt`, `rpcrt4`, and
 `advapi32`.
@@ -181,7 +181,7 @@ The Windows executable links only against Windows system libraries: `fwpuclnt`, 
 ## Beacon Object File
 
 The BOF packages DutchOven as a short, synchronous pulse that runs inline in an x64 Beacon. Build
-the COFF object and verify its import contract with:
+the COFF object, refresh the versioned artifact, and verify its import contract with:
 
 ```sh
 make bof

@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#define DUTCHOVEN_VERSION "0.4.0-dev"
+#define DUTCHOVEN_VERSION "0.4.0"
 
 /* Keep command rendering in one place so parse failures and --help never drift apart. */
 static void usage(FILE *stream) {

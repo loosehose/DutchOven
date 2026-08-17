@@ -27,6 +27,7 @@ WINDOWS_LDLIBS := -lfwpuclnt -lrpcrt4 -ladvapi32
 
 BOF_BUILD_DIR := bof/build
 BOF_TARGET := $(BOF_BUILD_DIR)/dutchoven.x64.o
+BOF_DIST := bof/dutchoven.x64.o
 BOF_SOURCE := bof/dutchoven_bof.c
 BOF_HEADERS := bof/include/beacon.h bof/include/bofdefs.h
 # BOF build: no CRT, unwind metadata, stack protector, or undeclared imports.
@@ -80,11 +81,14 @@ $(BOF_TARGET): $(BOF_SOURCE) $(BOF_HEADERS)
 	@mkdir -p $(@D)
 	$(BOF_CC) $(BOF_CPPFLAGS) $(BOF_CFLAGS) -c $(BOF_SOURCE) -o $@
 
-bof: $(BOF_TARGET)
-	bash bof/check_symbols.sh $(BOF_OBJDUMP) $(BOF_TARGET)
+$(BOF_DIST): $(BOF_TARGET)
+	cp $(BOF_TARGET) $(BOF_DIST)
 
-inspect-bof: $(BOF_TARGET)
-	$(BOF_OBJDUMP) -t $(BOF_TARGET)
+bof: $(BOF_DIST)
+	bash bof/check_symbols.sh $(BOF_OBJDUMP) $(BOF_DIST)
+
+inspect-bof: $(BOF_DIST)
+	$(BOF_OBJDUMP) -t $(BOF_DIST)
 
 check: test windows bof
 

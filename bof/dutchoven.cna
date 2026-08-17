@@ -43,9 +43,9 @@ alias dutchoven {
         return;
     }
 
-    $handle = openf(script_resource("build/dutchoven.x64.o"));
+    $handle = openf(script_resource("dutchoven.x64.o"));
     if ($handle is $null) {
-        berror($1, "Unable to read build/dutchoven.x64.o; run make bof first");
+        berror($1, "Unable to read dutchoven.x64.o; run make bof first");
         return;
     }
     $object = readb($handle, -1);
