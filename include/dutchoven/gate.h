@@ -32,6 +32,7 @@ typedef struct {
     do_gate_profile profile;
     int timing_overridden;
     int dry_run;
+    int json_output;
 } do_gate_config;
 
 /* Populate the default brownout profile without performing validation or I/O. */

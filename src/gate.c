@@ -158,6 +158,10 @@ int do_gate_parse(int argc, char **argv, do_gate_config *config,
             config->dry_run = 1;
             continue;
         }
+        if (strcmp(option, "--json") == 0) {
+            config->json_output = 1;
+            continue;
+        }
         if (strcmp(option, "--profile") == 0) {
             index++;
             continue;
@@ -228,7 +232,64 @@ int do_gate_parse(int argc, char **argv, do_gate_config *config,
     return 0;
 }
 
+static void print_json_string(const char *value) {
+    const unsigned char *cursor = (const unsigned char *)value;
+    (void)putchar('"');
+    while (*cursor != '\0') {
+        switch (*cursor) {
+            case '"':
+                (void)fputs("\\\"", stdout);
+                break;
+            case '\\':
+                (void)fputs("\\\\", stdout);
+                break;
+            case '\b':
+                (void)fputs("\\b", stdout);
+                break;
+            case '\f':
+                (void)fputs("\\f", stdout);
+                break;
+            case '\n':
+                (void)fputs("\\n", stdout);
+                break;
+            case '\r':
+                (void)fputs("\\r", stdout);
+                break;
+            case '\t':
+                (void)fputs("\\t", stdout);
+                break;
+            default:
+                if (*cursor < 0x20U) {
+                    (void)printf("\\u%04x", (unsigned)*cursor);
+                } else {
+                    (void)putchar((int)*cursor);
+                }
+                break;
+        }
+        cursor++;
+    }
+    (void)putchar('"');
+}
+
 void do_gate_print(const do_gate_config *config) {
+    if (config->json_output != 0) {
+        (void)fputs("{\"event\":\"config\",\"targets\":[", stdout);
+        for (size_t index = 0; index < config->app_count; index++) {
+            if (index != 0U) {
+                (void)putchar(',');
+            }
+            print_json_string(config->apps[index]);
+        }
+        (void)printf("],\"profile\":\"%s\",\"mode\":\"%s\","
+                     "\"block_ms\":%u,\"pass_ms\":%u,\"period_ms\":%u,"
+                     "\"duration_ms\":%u,\"warmup_ms\":%u,\"dry_run\":%s}\n",
+                     gate_profile_name(config->profile),
+                     config->block_ms == config->period_ms ? "blackout" : "brownout",
+                     config->block_ms, config->period_ms - config->block_ms,
+                     config->period_ms, config->duration_ms, config->warmup_ms,
+                     config->dry_run != 0 ? "true" : "false");
+        return;
+    }
     printf("Targets: %llu\n", (unsigned long long)config->app_count);
     for (size_t index = 0; index < config->app_count; index++) {
         printf("  %s\n", config->apps[index]);
@@ -291,6 +352,66 @@ static void gate_flush_log(void) {
     (void)fflush(stdout);
 }
 
+static void gate_log_warmup(const do_gate_config *config, unsigned long long wall_ms) {
+    if (config->json_output != 0) {
+        (void)printf("{\"event\":\"pass\",\"phase\":\"warmup\","
+                     "\"warmup_ms\":%u,\"wall_ms\":%llu}\n",
+                     config->warmup_ms, wall_ms);
+    } else {
+        (void)printf("PASS warmup=%ums wall_ms=%llu\n", config->warmup_ms, wall_ms);
+    }
+    gate_flush_log();
+}
+
+static void gate_log_block(const do_gate_config *config, unsigned cycle, size_t filter_count,
+                           unsigned long long wall_ms, unsigned long long elapsed_ms) {
+    if (config->json_output != 0) {
+        (void)printf("{\"event\":\"block\",\"cycle\":%u,\"filters\":%llu,"
+                     "\"wall_ms\":%llu,\"elapsed_ms\":%llu}\n",
+                     cycle, (unsigned long long)filter_count, wall_ms, elapsed_ms);
+    } else {
+        (void)printf("BLOCK cycle=%u filters=%llu wall_ms=%llu elapsed_ms=%llu\n",
+                     cycle, (unsigned long long)filter_count, wall_ms, elapsed_ms);
+    }
+    gate_flush_log();
+}
+
+static void gate_log_pass(const do_gate_config *config, unsigned cycle,
+                          unsigned long long wall_ms, unsigned long long elapsed_ms) {
+    if (config->json_output != 0) {
+        (void)printf("{\"event\":\"pass\",\"cycle\":%u,\"wall_ms\":%llu,"
+                     "\"elapsed_ms\":%llu}\n",
+                     cycle, wall_ms, elapsed_ms);
+    } else {
+        (void)printf("PASS cycle=%u wall_ms=%llu elapsed_ms=%llu\n",
+                     cycle, wall_ms, elapsed_ms);
+    }
+    gate_flush_log();
+}
+
+static void gate_log_cleanup(const do_gate_config *config, unsigned cycle,
+                             size_t remaining_filters, DWORD close_status,
+                             unsigned long long wall_ms,
+                             unsigned long long elapsed_ms) {
+    if (config->json_output != 0) {
+        (void)printf("{\"event\":\"cleanup\",\"filters\":%llu,"
+                     "\"session_closed\":%s,\"close_status\":%lu,\"cycles\":%u,"
+                     "\"wall_ms\":%llu,\"elapsed_ms\":%llu}\n",
+                     (unsigned long long)remaining_filters,
+                     close_status == ERROR_SUCCESS ? "true" : "false",
+                     (unsigned long)close_status, cycle, wall_ms, elapsed_ms);
+    } else if (close_status == ERROR_SUCCESS) {
+        (void)printf("CLEAN filters=0 session=closed cycles=%u wall_ms=%llu elapsed_ms=%llu\n",
+                     cycle, wall_ms, elapsed_ms);
+    } else {
+        (void)printf("CLEAN filters=%llu session=close_failed status=%lu cycles=%u "
+                     "wall_ms=%llu elapsed_ms=%llu\n",
+                     (unsigned long long)remaining_filters, (unsigned long)close_status,
+                     cycle, wall_ms, elapsed_ms);
+    }
+    gate_flush_log();
+}
+
 static BOOL WINAPI gate_console_handler(DWORD signal) {
     /* Console handlers must stay minimal: request cancellation and let the main path clean up. */
     if (signal == CTRL_C_EVENT || signal == CTRL_BREAK_EVENT || signal == CTRL_CLOSE_EVENT ||
@@ -336,41 +457,53 @@ static int gate_is_administrator(void) {
 
 static int gate_prepare_app(const char *path, FWP_BYTE_BLOB **app_id,
                             char *error, size_t error_capacity) {
-    char full_path[DO_PATH_MAX];
+    wchar_t input_path[DO_PATH_MAX];
     wchar_t wide_path[DO_PATH_MAX];
+    wchar_t canonical_path[DO_PATH_MAX];
     DWORD attributes;
-    DWORD length = GetFullPathNameA(path, (DWORD)sizeof(full_path), full_path, NULL);
-    int wide_length;
+    DWORD length;
     DWORD result;
-    if (length == 0U || length >= (DWORD)sizeof(full_path)) {
+    int wide_length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                          input_path,
+                                          (int)(sizeof(input_path) / sizeof(input_path[0])));
+    if (wide_length <= 0) {
+        (void)snprintf(error, error_capacity, "cannot encode UTF-8 target path: %s", path);
+        return -1;
+    }
+    length = GetFullPathNameW(input_path,
+                              (DWORD)(sizeof(wide_path) / sizeof(wide_path[0])),
+                              wide_path, NULL);
+    if (length == 0U || length >= (DWORD)(sizeof(wide_path) / sizeof(wide_path[0]))) {
         (void)snprintf(error, error_capacity, "cannot resolve target path: %s", path);
         return -1;
     }
-    attributes = GetFileAttributesA(full_path);
-    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U) {
-        (void)snprintf(error, error_capacity, "target is not an executable file: %s", full_path);
+    /* WFP uses the image's long canonical path; an 8.3 alias produces a different AppID blob. */
+    length = GetLongPathNameW(wide_path, canonical_path,
+                              (DWORD)(sizeof(canonical_path) / sizeof(canonical_path[0])));
+    if (length == 0U || length >= (DWORD)(sizeof(canonical_path) / sizeof(canonical_path[0]))) {
+        (void)snprintf(error, error_capacity, "cannot canonicalize target path: %s", path);
         return -1;
     }
-    wide_length = MultiByteToWideChar(CP_ACP, MB_ERR_INVALID_CHARS, full_path, -1,
-                                      wide_path, (int)(sizeof(wide_path) / sizeof(wide_path[0])));
-    if (wide_length <= 0) {
-        (void)snprintf(error, error_capacity, "cannot encode target path: %s", full_path);
+    attributes = GetFileAttributesW(canonical_path);
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U) {
+        (void)snprintf(error, error_capacity, "target is not an executable file: %s", path);
         return -1;
     }
     /* WFP matches its canonical AppID blob, not the operator's original path string. */
-    result = FwpmGetAppIdFromFileName0(wide_path, app_id);
+    result = FwpmGetAppIdFromFileName0(canonical_path, app_id);
     if (result != ERROR_SUCCESS) {
         (void)snprintf(error, error_capacity, "cannot derive WFP AppID for %s: %lu",
-                       full_path, (unsigned long)result);
+                       path, (unsigned long)result);
         return -1;
     }
     return 0;
 }
 
-static void gate_engine_close(do_gate_engine *gate) {
+static DWORD gate_engine_close(do_gate_engine *gate) {
     /* Closing a dynamic session removes its sublayer and filters, even after explicit cleanup fails. */
+    DWORD status = ERROR_SUCCESS;
     if (gate->engine != NULL) {
-        (void)FwpmEngineClose0(gate->engine);
+        status = FwpmEngineClose0(gate->engine);
         gate->engine = NULL;
     }
     for (size_t index = 0; index < DO_GATE_MAX_APPS; index++) {
@@ -379,6 +512,7 @@ static void gate_engine_close(do_gate_engine *gate) {
         }
     }
     gate->filter_count = 0U;
+    return status;
 }
 
 static int gate_engine_open(do_gate_engine *gate, const do_gate_config *config,
@@ -404,7 +538,7 @@ static int gate_engine_open(do_gate_engine *gate, const do_gate_config *config,
     if (uuid_result != RPC_S_OK && uuid_result != RPC_S_UUID_LOCAL_ONLY) {
         (void)snprintf(error, error_capacity, "cannot create WFP sublayer identifier: %lu",
                        (unsigned long)uuid_result);
-        gate_engine_close(gate);
+        (void)gate_engine_close(gate);
         return -1;
     }
     memset(&sublayer, 0, sizeof(sublayer));
@@ -417,13 +551,13 @@ static int gate_engine_open(do_gate_engine *gate, const do_gate_config *config,
     if (result != ERROR_SUCCESS) {
         (void)snprintf(error, error_capacity, "cannot add dynamic WFP sublayer: %lu",
                        (unsigned long)result);
-        gate_engine_close(gate);
+        (void)gate_engine_close(gate);
         return -1;
     }
     for (size_t index = 0; index < config->app_count; index++) {
         if (gate_prepare_app(config->apps[index], &gate->app_ids[index],
                              error, error_capacity) != 0) {
-            gate_engine_close(gate);
+            (void)gate_engine_close(gate);
             return -1;
         }
     }
@@ -528,6 +662,8 @@ static int gate_pass(do_gate_engine *gate, char *error, size_t error_capacity) {
 
 int do_gate_run(const do_gate_config *config, char *error, size_t error_capacity) {
     do_gate_engine gate;
+    DWORD close_status;
+    size_t remaining_filters;
     ULONGLONG run_start;
     ULONGLONG run_end;
     unsigned cycle = 0U;
@@ -544,10 +680,16 @@ int do_gate_run(const do_gate_config *config, char *error, size_t error_capacity
         return -1;
     }
     (void)InterlockedExchange(&do_gate_stop_requested, 0L);
-    (void)SetConsoleCtrlHandler(gate_console_handler, TRUE);
+    if (SetConsoleCtrlHandler(gate_console_handler, TRUE) == 0) {
+        DWORD handler_status = GetLastError();
+        close_status = gate_engine_close(&gate);
+        (void)snprintf(error, error_capacity,
+                       "cannot install console cleanup handler: %lu (engine close: %lu)",
+                       (unsigned long)handler_status, (unsigned long)close_status);
+        return -1;
+    }
     if (config->warmup_ms > 0U) {
-        printf("PASS warmup=%ums wall_ms=%llu\n", config->warmup_ms, gate_wall_ms());
-        gate_flush_log();
+        gate_log_warmup(config, gate_wall_ms());
         gate_wait_until(GetTickCount64() + (ULONGLONG)config->warmup_ms);
     }
     run_start = GetTickCount64();
@@ -558,10 +700,8 @@ int do_gate_run(const do_gate_config *config, char *error, size_t error_capacity
         if (gate_block(&gate, config, error, error_capacity) != 0) {
             goto cleanup;
         }
-        printf("BLOCK cycle=1 filters=%llu wall_ms=%llu elapsed_ms=%llu\n",
-               (unsigned long long)gate.filter_count, gate_wall_ms(),
-               (unsigned long long)(GetTickCount64() - run_start));
-        gate_flush_log();
+        gate_log_block(config, cycle, gate.filter_count, gate_wall_ms(),
+                       (unsigned long long)(GetTickCount64() - run_start));
         gate_wait_until(run_end);
         outcome = 0;
         goto cleanup;
@@ -579,18 +719,15 @@ int do_gate_run(const do_gate_config *config, char *error, size_t error_capacity
         if (gate_block(&gate, config, error, error_capacity) != 0) {
             goto cleanup;
         }
-        printf("BLOCK cycle=%u filters=%llu wall_ms=%llu elapsed_ms=%llu\n", cycle,
-               (unsigned long long)gate.filter_count, gate_wall_ms(),
-               (unsigned long long)(GetTickCount64() - run_start));
-        gate_flush_log();
+        gate_log_block(config, cycle, gate.filter_count, gate_wall_ms(),
+                       (unsigned long long)(GetTickCount64() - run_start));
         gate_wait_until(block_end < run_end ? block_end : run_end);
         if (gate_pass(&gate, error, error_capacity) != 0) {
             goto cleanup;
         }
         if (GetTickCount64() < run_end && !gate_stopping()) {
-            printf("PASS cycle=%u wall_ms=%llu elapsed_ms=%llu\n", cycle,
-                   gate_wall_ms(), (unsigned long long)(GetTickCount64() - run_start));
-            gate_flush_log();
+            gate_log_pass(config, cycle, gate_wall_ms(),
+                          (unsigned long long)(GetTickCount64() - run_start));
             gate_wait_until(cycle_end < run_end ? cycle_end : run_end);
         }
     }
@@ -603,11 +740,19 @@ cleanup:
         char cleanup_error[DO_ERROR_MAX];
         (void)gate_pass(&gate, cleanup_error, sizeof(cleanup_error));
     }
-    gate_engine_close(&gate);
+    remaining_filters = gate.filter_count;
+    close_status = gate_engine_close(&gate);
+    if (close_status == ERROR_SUCCESS) {
+        remaining_filters = 0U;
+    }
     (void)SetConsoleCtrlHandler(gate_console_handler, FALSE);
-    printf("CLEAN filters=0 session=closed cycles=%u wall_ms=%llu elapsed_ms=%llu\n",
-           cycle, gate_wall_ms(), (unsigned long long)(GetTickCount64() - run_start));
-    gate_flush_log();
+    gate_log_cleanup(config, cycle, remaining_filters, close_status, gate_wall_ms(),
+                     (unsigned long long)(GetTickCount64() - run_start));
+    if (close_status != ERROR_SUCCESS && outcome == 0) {
+        (void)snprintf(error, error_capacity, "cannot close dynamic WFP session: %lu",
+                       (unsigned long)close_status);
+        outcome = -1;
+    }
     return outcome;
 }
 

@@ -46,6 +46,10 @@ recovery behavior while a process remains alive.
 | Native C implementation | No Go, .NET, service installation, or custom driver dependency |
 | Explicit targets only | No product enumeration, process guessing, or embedded target database |
 
+DutchOven gates **new outbound connection authorization**. An existing connection that WFP has
+already authorized is not retroactively terminated; use a fresh canary connection or independently
+force the target to reconnect when validating an uninterrupted long-lived flow.
+
 ## Quick start
 
 Open an **elevated PowerShell** window.
@@ -100,7 +104,10 @@ dutchoven --app <absolute.exe> [--app <absolute.exe> ...] [options]
 | `--duration-ms <ms>` | No | Override the bounded total runtime |
 | `--warmup-ms <ms>` | No | Allow traffic before the first block interval |
 | `--dry-run` | No | Validate and print configuration without opening WFP |
+| `--json` | No | Emit configuration and state transitions as JSON Lines |
 | `--help` | No | Print command help |
+
+Print the build version with `dutchoven version`.
 
 Advanced timing flags override the selected profile regardless of argument order:
 
@@ -111,6 +118,12 @@ Advanced timing flags override the selected profile regardless of argument order
   --block-ms 2000 `
   --duration-ms 120000 `
   --warmup-ms 5000
+```
+
+JSON Lines are intended for test harnesses and evidence collection:
+
+```powershell
+.\dutchoven.exe --app 'C:\Path\To\Target.exe' --profile heavy --json
 ```
 
 Timing limits are enforced by the parser:
@@ -141,6 +154,10 @@ explicit executable path
 4. At the beginning of a pass interval, those filters are removed in one transaction.
 5. At completion or normal interruption, DutchOven removes any active filters and closes the engine.
 
+Windows targets are resolved as Unicode and canonicalized to their long path before DutchOven asks
+WFP for an application identity. This prevents an 8.3 path alias such as `ADMINI~1` from silently
+creating a filter that cannot match the process's long-form image identity.
+
 The console prints state transitions with wall-clock and schedule-relative timestamps:
 
 ```text
@@ -161,9 +178,13 @@ The default Linux build exercises parsing and dry-run behavior. The live WFP gat
 native Windows cross-build.
 
 ```sh
-make test
-make windows
+make check
+make release
 ```
+
+`make check` runs the portable tests, cross-builds the Windows artifacts, and verifies the BOF
+import contract. `make release` produces stripped release artifacts and `SHA256SUMS` under
+`artifacts/v<version>/`.
 
 Primary outputs:
 
@@ -173,7 +194,9 @@ Primary outputs:
 | `build/dutchoven_tests` | Core unit tests |
 | `build-windows/dutchoven.exe` | Native Windows WFP gate |
 | `build-windows/dutchoven_tests.exe` | Native Windows test binary |
+| `build-windows/windows_canary.exe` | Routed integration-test canary |
 | `bof/dutchoven.x64.o` | Versioned x64 Beacon Object File |
+| `artifacts/v<version>/` | Stripped release EXE, BOF, and checksums |
 
 The Windows executable links only against Windows system libraries: `fwpuclnt`, `rpcrt4`, and
 `advapi32`.
@@ -225,6 +248,37 @@ proof that the target experienced the intended brownout.
 6. Confirm the control remained unaffected and every pass interval recovered.
 7. Confirm no DutchOven filters remain after normal exit and forced termination.
 
+The repository includes a Windows integration harness that automates those assertions with two
+copies of a harmless TCP canary. It requires an elevated PowerShell session and a reachable
+non-local TCP listener; loopback traffic is not a valid substitute for routed WFP validation.
+
+```powershell
+.\tests\windows_integration.ps1 `
+  -DutchOvenPath '.\build-windows\dutchoven.exe' `
+  -CanaryPath '.\build-windows\windows_canary.exe' `
+  -ServerAddress '192.0.2.10' `
+  -ServerPort 8443
+```
+
+The harness proves baseline connectivity, targeted blocking, an unaffected control, normal
+recovery, forced-termination recovery through the dynamic session, and zero WFP residue.
+
+## Verified behavior
+
+DutchOven `0.4.1` was validated on Windows Server 2022 with Elastic Defend 9.4.2:
+
+- six live filters covered IPv4 and IPv6 for three explicit Elastic executable paths;
+- after forcing fresh connections, targeted backend connections fell to zero while an unrelated
+  PowerShell control still reached both backend ports;
+- the Elastic services remained running throughout the bounded blackout;
+- DutchOven exited successfully and independent WFP state dumps found no residual filter, session,
+  or sublayer; and
+- all agent connections and Fleet health recovered.
+
+Elastic recorded DutchOven's process start, process end, SYSTEM identity, and complete command line,
+then delivered buffered telemetry after recovery. It did not produce an Elastic Defend alert in
+that configuration. Treat this as one measured result, not a universal detection or evasion claim.
+
 ## Operational boundaries
 
 DutchOven intentionally does **not**:
@@ -249,4 +303,6 @@ observed result and must be measured rather than assumed.
 | `src/main.c` | Minimal command-line entry point |
 | `src/gate.c` | WFP gate, profiles, timing, and cleanup |
 | `tests/test_gate.c` | Parser, profile, and boundary tests |
+| `tests/windows_canary.c` | Harmless TCP canary for routed Windows integration tests |
+| `tests/windows_integration.ps1` | Normal and forced-cleanup WFP integration harness |
 | `bof/` | x64 BOF source, Aggressor wrapper, and contract checker |

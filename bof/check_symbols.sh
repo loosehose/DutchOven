@@ -27,6 +27,7 @@ while IFS= read -r symbol; do
         __imp_BeaconIsAdmin|\
         __imp_KERNEL32\$GetFileAttributesW|\
         __imp_KERNEL32\$GetFullPathNameW|\
+        __imp_KERNEL32\$GetLongPathNameW|\
         __imp_KERNEL32\$GetModuleFileNameW|\
         __imp_KERNEL32\$lstrcmpiW|\
         __imp_KERNEL32\$Sleep|\

@@ -8,6 +8,7 @@
 /* MODULE$Function names opt each Win32 call into Beacon's Dynamic Function Resolution. */
 DECLSPEC_IMPORT DWORD WINAPI KERNEL32$GetFileAttributesW(LPCWSTR);
 DECLSPEC_IMPORT DWORD WINAPI KERNEL32$GetFullPathNameW(LPCWSTR, DWORD, LPWSTR, LPWSTR *);
+DECLSPEC_IMPORT DWORD WINAPI KERNEL32$GetLongPathNameW(LPCWSTR, LPWSTR, DWORD);
 DECLSPEC_IMPORT DWORD WINAPI KERNEL32$GetModuleFileNameW(HMODULE, LPWSTR, DWORD);
 DECLSPEC_IMPORT int WINAPI KERNEL32$lstrcmpiW(LPCWSTR, LPCWSTR);
 DECLSPEC_IMPORT VOID WINAPI KERNEL32$Sleep(DWORD);
@@ -32,6 +33,7 @@ DECLSPEC_IMPORT DWORD WINAPI FWPUCLNT$FwpmFilterDeleteById0(HANDLE, UINT64);
 /* Preserve normal Win32 call sites while emitting the DFR symbol names above. */
 #define GetFileAttributesW KERNEL32$GetFileAttributesW
 #define GetFullPathNameW KERNEL32$GetFullPathNameW
+#define GetLongPathNameW KERNEL32$GetLongPathNameW
 #define GetModuleFileNameW KERNEL32$GetModuleFileNameW
 #define lstrcmpiW KERNEL32$lstrcmpiW
 #define Sleep KERNEL32$Sleep

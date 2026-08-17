@@ -2,6 +2,7 @@ CC ?= cc
 WINDOWS_CC ?= x86_64-w64-mingw32-gcc
 BOF_CC ?= $(WINDOWS_CC)
 BOF_OBJDUMP ?= x86_64-w64-mingw32-objdump
+VERSION := 0.4.1
 
 # Native build: parser tests and dry-run behavior on the development host.
 CPPFLAGS := -Iinclude
@@ -23,7 +24,9 @@ WINDOWS_TEST_OBJECTS := $(TEST_SOURCES:%.c=$(WINDOWS_BUILD_DIR)/%.test.o)
 # Windows build: the same core compiled with the live WFP implementation enabled.
 WINDOWS_CPPFLAGS := -Iinclude
 WINDOWS_CFLAGS := $(CFLAGS) -D_WIN32_WINNT=0x0601 -D__USE_MINGW_ANSI_STDIO=1
+WINDOWS_LDFLAGS := -municode
 WINDOWS_LDLIBS := -lfwpuclnt -lrpcrt4 -ladvapi32
+WINDOWS_CANARY := $(WINDOWS_BUILD_DIR)/windows_canary.exe
 
 BOF_BUILD_DIR := bof/build
 BOF_TARGET := $(BOF_BUILD_DIR)/dutchoven.x64.o
@@ -35,7 +38,15 @@ BOF_CPPFLAGS := -Ibof/include -D_WIN32_WINNT=0x0601 -DUNICODE -D_UNICODE
 BOF_CFLAGS := -Os -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror \
 	-fno-asynchronous-unwind-tables -fno-builtin -fno-ident -fno-stack-protector
 
-.PHONY: all test check windows bof inspect-bof clean
+RELEASE_DIR := artifacts/v$(VERSION)
+RELEASE_EXE := $(RELEASE_DIR)/dutchoven.exe
+RELEASE_BOF := $(RELEASE_DIR)/dutchoven.x64.o
+RELEASE_SUMS := $(RELEASE_DIR)/SHA256SUMS
+RELEASE_CFLAGS := -Os -DNDEBUG -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow \
+	-D_WIN32_WINNT=0x0601 -D__USE_MINGW_ANSI_STDIO=1
+RELEASE_LDFLAGS := $(WINDOWS_LDFLAGS) -Wl,--no-insert-timestamp -s
+
+.PHONY: all test check windows bof release inspect-bof clean
 
 all: $(TARGET)
 
@@ -61,7 +72,7 @@ test: $(TARGET) $(TEST_TARGET)
 
 $(WINDOWS_TARGET): $(WINDOWS_OBJECTS)
 	@mkdir -p $(@D)
-	$(WINDOWS_CC) $(WINDOWS_CFLAGS) $^ $(WINDOWS_LDLIBS) -o $@
+	$(WINDOWS_CC) $(WINDOWS_CFLAGS) $(WINDOWS_LDFLAGS) $^ $(WINDOWS_LDLIBS) -o $@
 
 $(WINDOWS_TEST_TARGET): $(WINDOWS_TEST_OBJECTS)
 	@mkdir -p $(@D)
@@ -75,7 +86,12 @@ $(WINDOWS_BUILD_DIR)/%.test.o: %.c
 	@mkdir -p $(@D)
 	$(WINDOWS_CC) $(WINDOWS_CPPFLAGS) $(WINDOWS_CFLAGS) -MMD -MP -c $< -o $@
 
-windows: $(WINDOWS_TARGET) $(WINDOWS_TEST_TARGET)
+$(WINDOWS_CANARY): tests/windows_canary.c
+	@mkdir -p $(@D)
+	$(WINDOWS_CC) -O2 -std=c11 -Wall -Wextra -Wpedantic -Wconversion -Wshadow \
+		-D_WIN32_WINNT=0x0601 $< -lws2_32 -o $@
+
+windows: $(WINDOWS_TARGET) $(WINDOWS_TEST_TARGET) $(WINDOWS_CANARY)
 
 $(BOF_TARGET): $(BOF_SOURCE) $(BOF_HEADERS)
 	@mkdir -p $(@D)
@@ -86,6 +102,20 @@ $(BOF_DIST): $(BOF_TARGET)
 
 bof: $(BOF_DIST)
 	bash bof/check_symbols.sh $(BOF_OBJDUMP) $(BOF_DIST)
+
+$(RELEASE_EXE): $(SOURCES)
+	@mkdir -p $(@D)
+	$(WINDOWS_CC) $(WINDOWS_CPPFLAGS) $(RELEASE_CFLAGS) $(RELEASE_LDFLAGS) $^ \
+		$(WINDOWS_LDLIBS) -o $@
+
+$(RELEASE_BOF): $(BOF_DIST)
+	@mkdir -p $(@D)
+	cp $(BOF_DIST) $@
+
+$(RELEASE_SUMS): $(RELEASE_EXE) $(RELEASE_BOF)
+	cd $(RELEASE_DIR) && sha256sum dutchoven.exe dutchoven.x64.o > SHA256SUMS
+
+release: $(RELEASE_SUMS)
 
 inspect-bof: $(BOF_DIST)
 	$(BOF_OBJDUMP) -t $(BOF_DIST)
