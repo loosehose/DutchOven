@@ -13,6 +13,10 @@
 </p>
 
 <p align="center">
+  <a href="https://ryan.framinan.net/blog/dutchoven">Read the accompanying blog post →</a>
+</p>
+
+<p align="center">
   <a href="#quick-start">Quick start</a> •
   <a href="#operation-profiles">Profiles</a> •
   <a href="#cli-reference">CLI</a> •
